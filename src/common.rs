@@ -23,34 +23,31 @@ pub trait TableProviderFactory: Debug + Send + Sync {
 #[derive(Debug)]
 pub struct DatabaseCatalogProvider {
     schemas: DashMap<String, Arc<dyn SchemaProvider>>,
-    table_provider_factory: Option<Arc<dyn TableProviderFactory>>,
 }
 
 impl DatabaseCatalogProvider {
-    pub async fn try_new<T: 'static, P: 'static>(pool: Pool<T, P>) -> Result<Self> {
+    pub async fn try_new<T: 'static, P: 'static>(
+        pool: Pool<T, P>,
+        table_provider_factory: Option<Arc<dyn TableProviderFactory>>,
+    ) -> Result<Self> {
         let conn = pool.connect().await?;
 
         let schemas = get_schemas(conn).await?;
         let schema_map = DashMap::new();
 
         for schema in schemas {
-            let provider =
-                DatabaseSchemaProvider::try_new(schema.clone(), pool.clone(), None).await?;
+            let provider = DatabaseSchemaProvider::try_new(
+                schema.clone(),
+                pool.clone(),
+                table_provider_factory.clone(),
+            )
+            .await?;
             schema_map.insert(schema, Arc::new(provider) as Arc<dyn SchemaProvider>);
         }
 
         Ok(Self {
             schemas: schema_map,
-            table_provider_factory: None,
         })
-    }
-
-    pub fn with_table_provider_factory(
-        mut self,
-        table_provider_factory: Arc<dyn TableProviderFactory>,
-    ) -> Self {
-        self.table_provider_factory = Some(table_provider_factory);
-        self
     }
 }
 
