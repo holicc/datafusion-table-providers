@@ -124,6 +124,7 @@ pub enum Error {
 
 type Result<T, E = Error> = std::result::Result<T, E>;
 
+#[derive(Debug)]
 pub struct PostgresTableFactory {
     pool: Arc<PostgresConnectionPool>,
 }
@@ -178,6 +179,16 @@ impl PostgresTableFactory {
         );
 
         Ok(PostgresTableWriter::create(read_provider, postgres, None))
+    }
+}
+
+#[async_trait]
+impl crate::common::TableProviderFactory for PostgresTableFactory {
+    async fn create(
+        &self,
+        table: TableReference,
+    ) -> Result<Arc<dyn TableProvider + 'static>, Box<dyn std::error::Error + Send + Sync>> {
+        self.read_write_table_provider(table).await
     }
 }
 

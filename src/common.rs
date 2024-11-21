@@ -10,13 +10,20 @@ use datafusion::{
     catalog::{CatalogProvider, SchemaProvider, TableProvider},
     sql::TableReference,
 };
+use std::fmt::Debug;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 type Pool<T, P> = Arc<dyn DbConnectionPool<T, P> + Send + Sync>;
 
+#[async_trait]
+pub trait TableProviderFactory: Debug + Send + Sync {
+    async fn create(&self, tbale: TableReference) -> Result<Arc<dyn TableProvider>>;
+}
+
 #[derive(Debug)]
 pub struct DatabaseCatalogProvider {
     schemas: DashMap<String, Arc<dyn SchemaProvider>>,
+    table_provider_factory: Option<Arc<dyn TableProviderFactory>>,
 }
 
 impl DatabaseCatalogProvider {
@@ -27,13 +34,23 @@ impl DatabaseCatalogProvider {
         let schema_map = DashMap::new();
 
         for schema in schemas {
-            let provider = DatabaseSchemaProvider::try_new(schema.clone(), pool.clone()).await?;
+            let provider =
+                DatabaseSchemaProvider::try_new(schema.clone(), pool.clone(), None).await?;
             schema_map.insert(schema, Arc::new(provider) as Arc<dyn SchemaProvider>);
         }
 
         Ok(Self {
             schemas: schema_map,
+            table_provider_factory: None,
         })
+    }
+
+    pub fn with_table_provider_factory(
+        mut self,
+        table_provider_factory: Arc<dyn TableProviderFactory>,
+    ) -> Self {
+        self.table_provider_factory = Some(table_provider_factory);
+        self
     }
 }
 
@@ -55,6 +72,7 @@ pub struct DatabaseSchemaProvider<T, P> {
     name: String,
     tables: Vec<String>,
     pool: Pool<T, P>,
+    table_provider_factory: Option<Arc<dyn TableProviderFactory>>,
 }
 
 impl<T, P> std::fmt::Debug for DatabaseSchemaProvider<T, P> {
@@ -64,11 +82,20 @@ impl<T, P> std::fmt::Debug for DatabaseSchemaProvider<T, P> {
 }
 
 impl<T, P: 'static> DatabaseSchemaProvider<T, P> {
-    pub async fn try_new(name: String, pool: Pool<T, P>) -> Result<Self> {
+    pub async fn try_new(
+        name: String,
+        pool: Pool<T, P>,
+        table_provider_factory: Option<Arc<dyn TableProviderFactory>>,
+    ) -> Result<Self> {
         let conn = pool.connect().await?;
         let tables = get_tables(conn, &name).await?;
 
-        Ok(Self { name, tables, pool })
+        Ok(Self {
+            name,
+            tables,
+            pool,
+            table_provider_factory,
+        })
     }
 }
 
@@ -84,15 +111,26 @@ impl<T: 'static, P: 'static> SchemaProvider for DatabaseSchemaProvider<T, P> {
 
     async fn table(&self, table: &str) -> DataFusionResult<Option<Arc<dyn TableProvider>>> {
         if self.table_exist(table) {
-            SqlTable::new(
-                &self.name,
-                &self.pool,
-                TableReference::partial(self.name.clone(), table.to_string()),
-                None,
-            )
-            .await
-            .map(|v| Some(Arc::new(v) as Arc<dyn TableProvider>))
-            .map_err(|e| DataFusionError::External(Box::new(e)))
+            if let Some(factory) = &self.table_provider_factory {
+                return factory
+                    .create(TableReference::partial(
+                        self.name.clone(),
+                        table.to_string(),
+                    ))
+                    .await
+                    .map(Some)
+                    .map_err(DataFusionError::External);
+            } else {
+                return SqlTable::new(
+                    &self.name,
+                    &self.pool,
+                    TableReference::partial(self.name.clone(), table.to_string()),
+                    None,
+                )
+                .await
+                .map(|v| Some(Arc::new(v) as Arc<dyn TableProvider>))
+                .map_err(|e| DataFusionError::External(Box::new(e)));
+            }
         } else {
             Ok(None)
         }
