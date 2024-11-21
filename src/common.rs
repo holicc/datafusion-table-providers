@@ -110,23 +110,15 @@ impl<T: 'static, P: 'static> SchemaProvider for DatabaseSchemaProvider<T, P> {
         if self.table_exist(table) {
             if let Some(factory) = &self.table_provider_factory {
                 return factory
-                    .create(TableReference::partial(
-                        self.name.clone(),
-                        table.to_string(),
-                    ))
+                    .create(TableReference::bare(table))
                     .await
                     .map(Some)
                     .map_err(DataFusionError::External);
             } else {
-                return SqlTable::new(
-                    &self.name,
-                    &self.pool,
-                    TableReference::partial(self.name.clone(), table.to_string()),
-                    None,
-                )
-                .await
-                .map(|v| Some(Arc::new(v) as Arc<dyn TableProvider>))
-                .map_err(|e| DataFusionError::External(Box::new(e)));
+                return SqlTable::new(&self.name, &self.pool, TableReference::bare(table), None)
+                    .await
+                    .map(|v| Some(Arc::new(v) as Arc<dyn TableProvider>))
+                    .map_err(|e| DataFusionError::External(Box::new(e)));
             }
         } else {
             Ok(None)
