@@ -9,6 +9,7 @@ use crate::sql::db_connection_pool::{
 };
 
 use crate::sql::sql_provider_datafusion::{Engine, SqlTable};
+use crate::util::to_datafusion_error;
 
 use arrow::{
     array::RecordBatch,
@@ -319,10 +320,6 @@ impl TableProviderFactory for PostgresTableProviderFactory {
             on_conflict,
         ))
     }
-}
-
-fn to_datafusion_error(error: Error) -> DataFusionError {
-    DataFusionError::External(Box::new(error))
 }
 
 #[derive(Debug, Clone)]

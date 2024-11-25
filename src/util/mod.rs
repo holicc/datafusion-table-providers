@@ -1,4 +1,4 @@
-use datafusion::logical_expr::Expr;
+use datafusion::{error::DataFusionError, logical_expr::Expr};
 use snafu::prelude::*;
 use std::collections::HashMap;
 use std::hash::Hash;
@@ -26,6 +26,14 @@ pub enum Error {
     UnableToGenerateSQL {
         source: datafusion::error::DataFusionError,
     },
+}
+
+#[must_use]
+pub fn to_datafusion_error<E>(error: E) -> DataFusionError
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    DataFusionError::External(Box::new(error))
 }
 
 pub fn filters_to_sql(filters: &[Expr], engine: Option<Engine>) -> Result<String, Error> {
