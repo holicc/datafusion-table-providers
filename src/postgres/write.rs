@@ -150,13 +150,13 @@ impl DataSink for PostgresDataSink {
 
             num_rows += batch_num_rows as u64;
 
-            constraints::validate_batch_with_constraints(
-                &[batch.clone()],
-                self.postgres.constraints(),
-            )
-            .await
-            .context(super::ConstraintViolationSnafu)
-            .map_err(to_datafusion_error)?;
+            // constraints::validate_batch_with_constraints(
+            //     &[batch.clone()],
+            //     self.postgres.constraints(),
+            // )
+            // .await
+            // .context(super::ConstraintViolationSnafu)
+            // .map_err(to_datafusion_error)?;
 
             self.postgres
                 .insert_batch(&tx, batch, self.on_conflict.clone())
