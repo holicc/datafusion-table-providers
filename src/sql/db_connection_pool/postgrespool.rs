@@ -72,7 +72,7 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 #[derive(Debug)]
 pub struct PostgresConnectionPool {
-    pool: Arc<bb8::Pool<PostgresConnectionManager<MakeTlsConnector>>>,
+    pub pool: Arc<bb8::Pool<PostgresConnectionManager<MakeTlsConnector>>>,
     join_push_down: JoinPushDown,
 }
 

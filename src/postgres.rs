@@ -57,6 +57,7 @@ pub type DynPostgresConnection = dyn DbConnection<
 >;
 
 #[derive(Debug, Snafu)]
+#[snafu(visibility(pub))]
 pub enum Error {
     #[snafu(display("DbConnectionError: {source}"))]
     DbConnectionError {
@@ -400,7 +401,7 @@ impl Postgres {
 
     async fn insert_batch(
         &self,
-        transaction: &Transaction<'_>,
+        transaction: Arc<PostgresConnection>,
         batch: RecordBatch,
         on_conflict: Option<OnConflict>,
     ) -> Result<()> {
@@ -413,7 +414,7 @@ impl Postgres {
             .build_postgres(sea_query_on_conflict)
             .context(UnableToCreateInsertStatementSnafu)?;
 
-        transaction
+        transaction.conn
             .execute(&sql, &[])
             .await
             .context(UnableToInsertArrowBatchSnafu)?;

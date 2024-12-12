@@ -125,24 +125,7 @@ impl DataSink for PostgresDataSink {
     ) -> datafusion::common::Result<u64> {
         let mut num_rows = 0;
 
-        let postgres_conn = self.postgres.pool.connect_direct().await.map(Box::new)?;
-        let a: &'static mut PostgresConnection = Box::leak(postgres_conn);
-
-        let tx = a
-            .conn
-            .transaction()
-            .await
-            .context(super::UnableToBeginTransactionSnafu)
-            .map_err(to_datafusion_error)
-            .map(Arc::new)?;
-
-        if self.overwrite {
-            self.postgres
-                .delete_all_table_data(&tx)
-                .await
-                .map_err(to_datafusion_error)?;
-        }
-
+        let conn = self.postgres.pool.connect_direct().await.map(Arc::new)?;
         let mut join_set = JoinSet::new();
 
         while let Some(batch) = data.next().await {
@@ -155,20 +138,12 @@ impl DataSink for PostgresDataSink {
 
             num_rows += batch_num_rows as u64;
 
-            // constraints::validate_batch_with_constraints(
-            //     &[batch.clone()],
-            //     self.postgres.constraints(),
-            // )
-            // .await
-            // .context(super::ConstraintViolationSnafu)
-            // .map_err(to_datafusion_error)?;
-
             let pg = self.postgres.clone();
-            let ttx = tx.clone();
+            let tx = conn.clone();
             let on_conflict = self.on_conflict.clone();
 
             join_set.spawn(async move {
-                pg.insert_batch(&ttx, batch, on_conflict)
+                pg.insert_batch(tx, batch, on_conflict)
                     .await
                     .map_err(to_datafusion_error)
             });
@@ -181,12 +156,6 @@ impl DataSink for PostgresDataSink {
             }
         }
 
-        match Arc::try_unwrap(tx) {
-            Ok(tx) => tx.commit().await.map_err(to_datafusion_error)?,
-            Err(_) => {
-                panic!("Failed to unwrap transaction")
-            }
-        }
 
         Ok(num_rows)
     }
