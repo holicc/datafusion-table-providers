@@ -325,7 +325,7 @@ impl TableProviderFactory for PostgresTableProviderFactory {
 
 #[derive(Debug, Clone)]
 pub struct Postgres {
-    table_name: String,
+    pub table_name: String,
     pool: Arc<PostgresConnectionPool>,
     schema: SchemaRef,
     constraints: Constraints,

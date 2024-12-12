@@ -1,6 +1,13 @@
-use std::{any::Any, fmt, sync::Arc};
+use std::{
+    any::Any,
+    fmt::{self},
+    sync::Arc,
+};
 
-use arrow::datatypes::SchemaRef;
+use arrow::{
+    datatypes::SchemaRef,
+    util::display::{ArrayFormatter, FormatOptions},
+};
 use async_trait::async_trait;
 use datafusion::{
     catalog::Session,
@@ -25,7 +32,13 @@ use crate::{
 
 use crate::postgres::Postgres;
 
-use super::{to_datafusion_error, DynPostgresConnection, UnableToDowncastDbConnectionSnafu};
+use super::{
+    to_datafusion_error, DynPostgresConnection, UnableToDowncastDbConnectionSnafu,
+    UnableToInsertArrowBatchSnafu,
+};
+
+use arrow::array::ArrayRef;
+use arrow::record_batch::RecordBatch;
 
 #[derive(Debug, Clone)]
 pub struct PostgresTableWriter {
@@ -140,11 +153,14 @@ impl DataSink for PostgresDataSink {
 
             let pg = self.postgres.clone();
             let tx = conn.clone();
-            let on_conflict = self.on_conflict.clone();
 
             join_set.spawn(async move {
-                pg.insert_batch(tx, batch, on_conflict)
+                let sql = batch_to_insert_sql(&batch, pg.table_name());
+
+                tx.conn
+                    .execute(&sql, &[])
                     .await
+                    .context(UnableToInsertArrowBatchSnafu)
                     .map_err(to_datafusion_error)
             });
         }
@@ -155,7 +171,6 @@ impl DataSink for PostgresDataSink {
                 Err(e) => return Err(e.into()),
             }
         }
-
 
         Ok(num_rows)
     }
@@ -171,6 +186,42 @@ impl PostgresDataSink {
     }
 }
 
+fn batch_to_insert_sql(batch: &RecordBatch, table_name: &str) -> String {
+    let schema = batch.schema();
+    let columns = schema
+        .fields()
+        .iter()
+        .map(|f| f.name().to_owned())
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let mut values = Vec::new();
+    let options = FormatOptions::new().with_null("NULL");
+
+    for row_idx in 0..batch.num_rows() {
+        let row_values: Vec<String> = (0..batch.num_columns())
+            .map(|col_idx| {
+                let array = batch.column(col_idx);
+                let format = ArrayFormatter::try_new(array, &options).unwrap();
+
+                if array.data_type().is_numeric() || array.is_null(row_idx) {
+                    format.value(row_idx).to_string()
+                } else {
+                    format!("'{}'", format.value(row_idx).to_string())
+                }
+            })
+            .collect();
+        values.push(format!("({})", row_values.join(", ")));
+    }
+
+    format!(
+        "INSERT INTO {} ({}) VALUES {}",
+        table_name,
+        columns,
+        values.join(", ")
+    )
+}
+
 impl std::fmt::Debug for PostgresDataSink {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "PostgresDataSink")
@@ -180,5 +231,89 @@ impl std::fmt::Debug for PostgresDataSink {
 impl DisplayAs for PostgresDataSink {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter) -> std::fmt::Result {
         write!(f, "PostgresDataSink")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::array::{Float64Array, Int32Array, StringArray};
+    use arrow::datatypes::{DataType, Field, Schema};
+
+    #[test]
+    fn test_batch_to_insert_sql() {
+        // 创建测试数据
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("name", DataType::Utf8, true),
+            Field::new("score", DataType::Float64, true),
+        ]));
+
+        let id_array = Int32Array::from(vec![1, 2, 3]);
+        let name_array = StringArray::from(vec![Some("Alice"), None, Some("Bob")]);
+        let score_array = Float64Array::from(vec![Some(85.5), Some(92.0), None]);
+
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(id_array),
+                Arc::new(name_array),
+                Arc::new(score_array),
+            ],
+        )
+        .unwrap();
+
+        let sql = batch_to_insert_sql(&batch, "students");
+
+        let expected = "\
+            INSERT INTO students (id, name, score) VALUES \
+            (1, 'Alice', 85.5), \
+            (2, NULL, 92.0), \
+            (3, 'Bob', NULL)";
+
+        assert_eq!(sql, expected);
+    }
+
+    #[test]
+    fn test_batch_to_insert_sql_empty_batch() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("name", DataType::Utf8, true),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int32Array::from(vec![] as Vec<i32>)),
+                Arc::new(StringArray::from(vec![] as Vec<Option<&str>>)),
+            ],
+        )
+        .unwrap();
+
+        let sql = batch_to_insert_sql(&batch, "test_table");
+        let expected = "INSERT INTO test_table (id, name) VALUES ";
+        assert_eq!(sql, expected);
+    }
+
+    #[test]
+    fn test_batch_to_insert_sql_special_chars() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("text", DataType::Utf8, true),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int32Array::from(vec![1])),
+                Arc::new(StringArray::from(vec![Some("O'Neil's \"quote\"")])),
+            ],
+        )
+        .unwrap();
+
+        let sql = batch_to_insert_sql(&batch, "quotes");
+        let expected = "INSERT INTO quotes (id, text) VALUES (1, 'O''Neil''s \"quote\"')";
+
+        assert_eq!(sql, expected);
     }
 }
