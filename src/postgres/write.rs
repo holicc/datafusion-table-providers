@@ -16,14 +16,16 @@ use datafusion::{
 };
 use futures::StreamExt;
 use snafu::prelude::*;
+use tokio::task::JoinSet;
 
-use crate::util::{
-    constraints, on_conflict::OnConflict, retriable_error::check_and_mark_retriable_error,
+use crate::{
+    sql::db_connection_pool::dbconnection::postgresconn::PostgresConnection,
+    util::{constraints, on_conflict::OnConflict, retriable_error::check_and_mark_retriable_error},
 };
 
 use crate::postgres::Postgres;
 
-use super::to_datafusion_error;
+use super::{to_datafusion_error, DynPostgresConnection, UnableToDowncastDbConnectionSnafu};
 
 #[derive(Debug, Clone)]
 pub struct PostgresTableWriter {
@@ -123,15 +125,16 @@ impl DataSink for PostgresDataSink {
     ) -> datafusion::common::Result<u64> {
         let mut num_rows = 0;
 
-        let mut db_conn = self.postgres.connect().await.map_err(to_datafusion_error)?;
-        let postgres_conn = Postgres::postgres_conn(&mut db_conn).map_err(to_datafusion_error)?;
+        let postgres_conn = self.postgres.pool.connect_direct().await.map(Box::new)?;
+        let a: &'static mut PostgresConnection = Box::leak(postgres_conn);
 
-        let tx = postgres_conn
+        let tx = a
             .conn
             .transaction()
             .await
             .context(super::UnableToBeginTransactionSnafu)
-            .map_err(to_datafusion_error)?;
+            .map_err(to_datafusion_error)
+            .map(Arc::new)?;
 
         if self.overwrite {
             self.postgres
@@ -139,6 +142,8 @@ impl DataSink for PostgresDataSink {
                 .await
                 .map_err(to_datafusion_error)?;
         }
+
+        let mut join_set = JoinSet::new();
 
         while let Some(batch) = data.next().await {
             let batch = batch.map_err(check_and_mark_retriable_error)?;
@@ -158,16 +163,30 @@ impl DataSink for PostgresDataSink {
             // .context(super::ConstraintViolationSnafu)
             // .map_err(to_datafusion_error)?;
 
-            self.postgres
-                .insert_batch(&tx, batch, self.on_conflict.clone())
-                .await
-                .map_err(to_datafusion_error)?;
+            let pg = self.postgres.clone();
+            let ttx = tx.clone();
+            let on_conflict = self.on_conflict.clone();
+
+            join_set.spawn(async move {
+                pg.insert_batch(&ttx, batch, on_conflict)
+                    .await
+                    .map_err(to_datafusion_error)
+            });
         }
 
-        tx.commit()
-            .await
-            .context(super::UnableToCommitPostgresTransactionSnafu)
-            .map_err(to_datafusion_error)?;
+        for res in join_set.join_all().await {
+            match res {
+                Ok(_) => (),
+                Err(e) => return Err(e.into()),
+            }
+        }
+
+        match Arc::try_unwrap(tx) {
+            Ok(tx) => tx.commit().await.map_err(to_datafusion_error)?,
+            Err(_) => {
+                panic!("Failed to unwrap transaction")
+            }
+        }
 
         Ok(num_rows)
     }
